@@ -65,7 +65,7 @@ struct socket {
 static struct memory current = { NULL, NULL, NULL };
 static unsigned int socket_count = 0;
 
-static struct socket *active = NULL;
+static struct socket **active = NULL;
 static unsigned int active_size = 0;
 
 static unsigned short *handle = NULL;
@@ -128,24 +128,24 @@ static unsigned char inc(unsigned char ch) {
 }
 
 static void close_socket(int i) {
-	unsigned char c = active[i].in_tail;
+	unsigned char c = (*active[i]).in_tail;
 	do {
-		if (NULL != active[i].incoming[c].owner) 
-			release_memory(active[i].incoming[c]);
+		if (NULL != (*active[i]).incoming[c].owner) 
+			release_memory((*active[i]).incoming[c]);
 		c = inc(c);
-	} while (c != active[i].in_tail);
+	} while (c != (*active[i]).in_tail);
 
-	while (active[i].out_tail != active[i].out_head) {
-		release_outgoing(&active[i].outgoing[active[i].out_tail]);
-		active[i].out_tail = inc(active[i].out_tail);
+	while ((*active[i]).out_tail != (*active[i]).out_head) {
+		release_outgoing(&(*active[i]).outgoing[(*active[i]).out_tail]);
+		(*active[i]).out_tail = inc((*active[i]).out_tail);
 	}
 
-	release_outgoing(&active[i].handshake);
-        if (active[i].handle < 0) {
-                assert(-active[i].handle < handle_size);
-                handle[-active[i].handle] = 0;
+	release_outgoing(&(*active[i]).handshake);
+        if ((*active[i]).handle < 0) {
+                assert(-(*active[i]).handle < handle_size);
+                handle[-(*active[i]).handle] = 0;
         }
-	active[i].handle = 0;
+	(*active[i]).handle = 0;
 	close(i);
         --socket_count;
 }
@@ -160,38 +160,41 @@ static void send_handshake(struct airhook_socket *air,int i) {
 
 	mem.end = mem.begin;
 	mem.begin -= data.end - data.begin;
-	mem.begin[0] = active[i].handle >> 8; /* BUG? */
-	mem.begin[1] = active[i].handle & 0xFF;
+	mem.begin[0] = (*active[i]).handle >> 8; /* BUG? */
+	mem.begin[1] = (*active[i]).handle & 0xFF;
 	mem.begin[2] = escape_value;
-	mem.begin[3] = active[i].out_flags;
-	mem.begin[4] = active[i].in_tail;
-	airhook_init_outgoing(&active[i].handshake,air,data,mem.owner);
+	mem.begin[3] = (*active[i]).out_flags;
+	mem.begin[4] = (*active[i]).in_tail;
+	airhook_init_outgoing(&(*active[i]).handshake,air,data,mem.owner);
 }
 
 static void open_socket(struct airhook_socket *air,int i) {
 	unsigned char c = 0;
 
 	if (i >= active_size) {
-		active = realloc(active,sizeof(*active)*(1 + 2*i));
+		active = realloc(active,sizeof(void *)*(1 + 2*i));
 		if (NULL == active) {
 			syslog(LOG_ERR,"malloc: %m");
 			exit(1);
 		}
 
-		while (active_size <= 2*i) active[active_size++].handle = 0;
+		while (active_size <= 2*i) { 
+		  active[active_size] = malloc(sizeof(struct socket));
+		  (*active[active_size++]).handle = 0;
+		}
 	}
 
-	assert(0 == active[i].handle);
+	assert(0 == (*active[i]).handle);
 	do {
-		active[i].incoming[c].owner = NULL;
+		(*active[i]).incoming[c].owner = NULL;
 		c = inc(c);
 	} while (0 != c);
 
-	active[i].handle = i;
-	active[i].out_head = active[i].out_tail = 0;
-	active[i].in_tail = 0;
-	active[i].flags = active[i].out_flags = 0;
-	active[i].out_pending = 0;
+	(*active[i]).handle = i;
+	(*active[i]).out_head = (*active[i]).out_tail = 0;
+	(*active[i]).in_tail = 0;
+	(*active[i]).flags = (*active[i]).out_flags = 0;
+	(*active[i]).out_pending = 0;
 	fcntl(i,F_SETFL,O_NONBLOCK);
         ++socket_count;
 }
@@ -199,7 +202,7 @@ static void open_socket(struct airhook_socket *air,int i) {
 static void reset(void) {
         int i;
 	for (i = 0; i < active_size; ++i)
-		if (0 != active[i].handle && (active[i].flags & is_dirty))
+		if (0 != (*active[i]).handle && ((*active[i]).flags & is_dirty))
 			close_socket(i);
 }
 
@@ -292,18 +295,18 @@ static void run(
 					/* TODO: i < 0? */
 					open_socket(air,i);
 					handle[-h] = i;
-					active[i].handle = h;
-					active[i].flags |= is_dirty;
+					(*active[i]).handle = h;
+					(*active[i]).flags |= is_dirty;
                                         send_handshake(air,i);
 					if (connect(i,
 						(struct sockaddr *) &opt.remote,
 						sizeof(opt.remote))
 					&&  errno != EINPROGRESS)
-						active[i].flags |=
+						(*active[i]).flags |=
 							  input_closed
 							| output_closed;
 				}
-			} else if (h >= active_size || 0 == active[h].handle) {
+			} else if (h >= active_size || 0 == (*active[h]).handle) {
 				syslog(LOG_WARNING,"unknown link");
 				continue;
 			} else
@@ -315,25 +318,25 @@ static void run(
 				const unsigned char tail = data.begin[4];
 
 				if (flags & output_closed) {
-				        if (!(active[i].flags & input_closed))
+				        if (!((*active[i]).flags & input_closed))
         					shutdown(i,0);
-                                        active[i].flags |= input_closed;
-                                        active[i].out_flags |= input_closed;
+                                        (*active[i]).flags |= input_closed;
+                                        (*active[i]).out_flags |= input_closed;
                                 }
 
 				if (flags & input_closed) {
-				        if (!(active[i].flags & output_closed))
+				        if (!((*active[i]).flags & output_closed))
         					shutdown(i,1);
-                                        active[i].flags |= output_closed;
-                                        active[i].out_flags |= output_closed;
+                                        (*active[i]).flags |= output_closed;
+                                        (*active[i]).out_flags |= output_closed;
                                 }
 
-				while (active[i].out_tail != tail 
-				   &&  active[i].out_tail != active[i].out_head)
+				while ((*active[i]).out_tail != tail 
+				   &&  (*active[i]).out_tail != (*active[i]).out_head)
 				{
 					struct airhook_outgoing * const out =
-						&active[i].outgoing[
-							active[i].out_tail];
+						&(*active[i]).outgoing[
+							(*active[i]).out_tail];
 					const struct airhook_outgoing_status s =
 						airhook_outgoing_status(out);
 					if (ah_discarded != s.state) {
@@ -341,14 +344,14 @@ static void run(
 						break;
 					}
 
-					active[i].out_pending -= 
+					(*active[i]).out_pending -= 
 						s.data.end - s.data.begin - 3;
-					active[i].out_tail = 
-						inc(active[i].out_tail);
+					(*active[i]).out_tail = 
+						inc((*active[i]).out_tail);
 				}
 			} else {
 				struct memory * const mem = 
-                                        &active[i].incoming[seq];
+                                        &(*active[i]).incoming[seq];
 				const unsigned long len = 
 					data.end - data.begin - 3;
 				if (NULL != mem->owner) {
@@ -372,25 +375,25 @@ static void run(
                  * after confirmations are discarded. */
 		for (i = 0; i < active_size; ++i) {
                         unsigned char out_flags;
-			if (0 == active[i].handle) continue;
+			if (0 == (*active[i]).handle) continue;
 
-                        out_flags = active[i].flags & ~is_dirty;
-			if (active[i].out_head != active[i].out_tail)
+                        out_flags = (*active[i]).flags & ~is_dirty;
+			if ((*active[i]).out_head != (*active[i]).out_tail)
 				out_flags &= ~input_closed;
 
-                        out_flags |= active[i].out_flags;
-			if (out_flags != active[i].out_flags) {
-				active[i].out_flags = out_flags;
-				release_outgoing(&active[i].handshake);
+                        out_flags |= (*active[i]).out_flags;
+			if (out_flags != (*active[i]).out_flags) {
+				(*active[i]).out_flags = out_flags;
+				release_outgoing(&(*active[i]).handshake);
 				send_handshake(air,i);
                                 continue;
 			}
 
-			if ((active[i].out_flags & input_closed)
-			&&  (active[i].out_flags & output_closed)) {
+			if (((*active[i]).out_flags & input_closed)
+			&&  ((*active[i]).out_flags & output_closed)) {
                                 const struct airhook_outgoing_status s =
                                         airhook_outgoing_status(
-                                                &active[i].handshake);
+                                                &(*active[i]).handshake);
                                 if (ah_discarded == s.state) close_socket(i);
                         }
 		}
@@ -435,19 +438,19 @@ static void run(
 		if (tcp >= 0) FD_SET(tcp,&rfd);
 
 		for (i = 0; i < active_size; ++i) {
-			if (0 == active[i].handle) continue;
+			if (0 == (*active[i]).handle) continue;
 
 			if (status.wanted > 0
-			&&  active[i].out_pending < status.settings.window_size
-			&&  inc(active[i].out_head) != active[i].out_tail
-                        && ((active[i].flags & is_dirty)
+			&&  (*active[i]).out_pending < status.settings.window_size
+			&&  inc((*active[i]).out_head) != (*active[i]).out_tail
+                        && (((*active[i]).flags & is_dirty)
                         ||  ah_discarded
-                        ==  airhook_outgoing_status(&active[i].handshake).state)
-			&& !(active[i].flags & input_closed))
+                        ==  airhook_outgoing_status(&(*active[i]).handshake).state)
+			&& !((*active[i]).flags & input_closed))
 				FD_SET(i,&rfd);
 
-			if (NULL != active[i].incoming[active[i].in_tail].owner
-			&& !(active[i].flags & output_closed))
+			if (NULL != (*active[i]).incoming[(*active[i]).in_tail].owner
+			&& !((*active[i]).flags & output_closed))
 				FD_SET(i,&wfd);
 		}
 
@@ -503,8 +506,8 @@ static void run(
 		}
 
 		for (i = 0; i < active_size; ++i) {
-			unsigned char in_tail = active[i].in_tail;
-			if (0 == active[i].handle) continue;
+			unsigned char in_tail = (*active[i]).in_tail;
+			if (0 == (*active[i]).handle) continue;
 
 			if (FD_ISSET(i,&rfd)) {
 				struct memory mem = get_memory(4);
@@ -513,26 +516,26 @@ static void run(
 				if (max > airhook_message_size - 3)
 					max = airhook_message_size - 3;
 
-				active[i].flags |= is_dirty;
+				(*active[i]).flags |= is_dirty;
 				r = read(i,3 + mem.begin,max); /* TODO: ??? */
 				if (r <= 0)
-					active[i].flags |= input_closed;
+					(*active[i]).flags |= input_closed;
 				else {
 					struct airhook_data data;
-					mem.begin[0] = active[i].handle >> 8;
-					mem.begin[1] = active[i].handle;
-					mem.begin[2] = active[i].out_head;
+					mem.begin[0] = (*active[i]).handle >> 8;
+					mem.begin[1] = (*active[i]).handle;
+					mem.begin[2] = (*active[i]).out_head;
 					data.begin = mem.begin;
 					data.end = mem.begin + 3 + r;
 					airhook_init_outgoing(
-						&active[i].outgoing[
-							active[i].out_head],
+						&(*active[i]).outgoing[
+							(*active[i]).out_head],
 						air,data,mem.owner);
-					active[i].out_head = 
-						inc(active[i].out_head);
-					active[i].out_pending += r;
-					AIRHOOK_ASSERT(active[i].out_head 
-					            != active[i].out_tail);
+					(*active[i]).out_head = 
+						inc((*active[i]).out_head);
+					(*active[i]).out_pending += r;
+					AIRHOOK_ASSERT((*active[i]).out_head 
+					            != (*active[i]).out_tail);
 
 					++mem.owner->use_count;
 					mem.begin += 3 + r;
@@ -544,14 +547,14 @@ static void run(
 
 			if (FD_ISSET(i,&wfd)) {
 				struct memory * const mem = 
-					&active[i].incoming[in_tail];
+					&(*active[i]).incoming[in_tail];
 				const unsigned long len = 
 					mem->end - mem->begin;
 
-				active[i].flags |= is_dirty;
+				(*active[i]).flags |= is_dirty;
 				r = write(i,mem->begin,len); /* TODO: writev? */
 				if (r <= 0)
-					active[i].flags |= output_closed;
+					(*active[i]).flags |= output_closed;
 				else {
 					++mem->owner->use_count;
 					mem->end = mem->begin + r;
@@ -567,9 +570,9 @@ static void run(
 				}
 			}
 
-			if (in_tail != active[i].in_tail) {
-				active[i].in_tail = in_tail;
-				release_outgoing(&active[i].handshake);
+			if (in_tail != (*active[i]).in_tail) {
+				(*active[i]).in_tail = in_tail;
+				release_outgoing(&(*active[i]).handshake);
 				send_handshake(air,i);
 				delay_update = 1;
 			}
